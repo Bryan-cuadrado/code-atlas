@@ -36,6 +36,8 @@ export interface RepoMetadata {
   totalCodeFilesInRepo?: number;
   analyzedFilesLimitReached?: boolean;
   maxCodeFilesLimit?: number;
+  fromCache?: boolean;
+  cachedAtIso?: string;
 }
 
 export interface SourceFileEntry {
@@ -134,4 +136,9 @@ export interface AnalysisExportReport {
   cycles: string[][];
   criticalFiles: ExportCriticalFileItem[];
   orphanFiles: string[];
+}
+
+export interface CachedCodeGraphEntry {
+  savedAt: number;
+  graph: CodeGraph;
 }

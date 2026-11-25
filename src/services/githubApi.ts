@@ -1,19 +1,25 @@
 import { isSupportedCodeFile } from '../core/dependencyParser';
+import { buildDependencyGraph } from '../core/graphBuilder';
 import type {
   AppError,
+  CachedCodeGraphEntry,
+  CodeGraph,
   ParsedRepoRef,
   RepoMetadata,
   SourceFileEntry,
 } from '../types/graph';
 
 const MAX_CODE_FILES = 100;
-const BLOB_FETCH_CONCURRENCY = 8;
+const FILE_FETCH_CONCURRENCY = 8;
+const CACHE_KEY_PREFIX = 'codeatlas:repo-cache:';
+const CACHE_TTL_MS = 30 * 60 * 1000;
 
 interface GitHubRepoApiResponse {
   name: string;
   full_name: string;
   default_branch: string;
   description: string | null;
+  private?: boolean;
   owner: {
     login: string;
   };
@@ -38,6 +44,97 @@ export class GitHubApiError extends Error {
     super(appError.message);
     this.name = 'GitHubApiError';
     this.appError = appError;
+  }
+}
+
+function getCacheStorageKey(ref: ParsedRepoRef): string {
+  return `${CACHE_KEY_PREFIX}${ref.owner.toLowerCase()}/${ref.name.toLowerCase()}`;
+}
+
+function isValidCachedEntry(value: unknown): value is CachedCodeGraphEntry {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const record = value as Partial<CachedCodeGraphEntry>;
+  if (typeof record.savedAt !== 'number' || !Number.isFinite(record.savedAt)) {
+    return false;
+  }
+
+  if (typeof record.graph !== 'object' || record.graph === null) {
+    return false;
+  }
+
+  const graph = record.graph as Partial<CodeGraph>;
+  return (
+    typeof graph.repo === 'object' &&
+    graph.repo !== null &&
+    Array.isArray(graph.nodes) &&
+    Array.isArray(graph.edges) &&
+    typeof graph.analysis === 'object' &&
+    graph.analysis !== null
+  );
+}
+
+export function readCachedRepoGraph(ref: ParsedRepoRef): CodeGraph | null {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return null;
+    }
+
+    const storageKey = getCacheStorageKey(ref);
+    const rawValue = window.localStorage.getItem(storageKey);
+    if (!rawValue) {
+      return null;
+    }
+
+    const parsed: unknown = JSON.parse(rawValue);
+    if (!isValidCachedEntry(parsed)) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    const ageMs = Date.now() - parsed.savedAt;
+    if (ageMs < 0 || ageMs > CACHE_TTL_MS) {
+      window.localStorage.removeItem(storageKey);
+      return null;
+    }
+
+    return {
+      ...parsed.graph,
+      repo: {
+        ...parsed.graph.repo,
+        fromCache: true,
+        cachedAtIso: new Date(parsed.savedAt).toISOString(),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeCachedRepoGraph(ref: ParsedRepoRef, graph: CodeGraph): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+
+    const storageKey = getCacheStorageKey(ref);
+    const entry: CachedCodeGraphEntry = {
+      savedAt: Date.now(),
+      graph: {
+        ...graph,
+        repo: {
+          ...graph.repo,
+          fromCache: false,
+          cachedAtIso: undefined,
+        },
+      },
+    };
+
+    window.localStorage.setItem(storageKey, JSON.stringify(entry));
+  } catch {
+    // Ignore storage quota or private browsing errors so analysis still succeeds.
   }
 }
 
@@ -137,13 +234,52 @@ function isExcludedDirectory(path: string): boolean {
   return /(^|\/)(node_modules|dist|build|target|\.mvn|__pycache__|\.git)(\/|$)/i.test(path);
 }
 
-async function fetchBlobsWithConcurrency(
+function encodeRawPath(filePath: string): string {
+  return filePath
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+async function fetchRawFileContent(
   owner: string,
   name: string,
+  branch: string,
+  filePath: string
+): Promise<string | null> {
+  const rawUrl = `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/${encodeRawPath(branch)}/${encodeRawPath(filePath)}`;
+  try {
+    const response = await fetch(rawUrl);
+    if (!response.ok) {
+      return null;
+    }
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchBlobContent(
+  owner: string,
+  name: string,
+  sha: string,
+  token?: string
+): Promise<string> {
+  const blobUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/git/blobs/${encodeURIComponent(sha)}`;
+  const response = await fetchGitHubResponse(blobUrl, 'application/vnd.github.raw+json', token);
+  return await response.text();
+}
+
+async function fetchFilesHybridWithConcurrency(
+  owner: string,
+  name: string,
+  branch: string,
+  isPrivateRepo: boolean,
   items: readonly GitHubTreeApiItem[],
   token?: string
 ): Promise<SourceFileEntry[]> {
   const results: SourceFileEntry[] = new Array<SourceFileEntry>(items.length);
+  const hasToken = Boolean(token?.trim());
   let nextIndex = 0;
 
   async function worker(): Promise<void> {
@@ -151,9 +287,16 @@ async function fetchBlobsWithConcurrency(
       const currentIndex = nextIndex;
       nextIndex += 1;
       const item = items[currentIndex];
-      const url = `https://api.github.com/repos/${owner}/${name}/git/blobs/${encodeURIComponent(item.sha)}`;
-      const response = await fetchGitHubResponse(url, 'application/vnd.github.raw+json', token);
-      const content = await response.text();
+
+      let content: string | null = null;
+      if (!(isPrivateRepo && hasToken)) {
+        content = await fetchRawFileContent(owner, name, branch, item.path);
+      }
+
+      if (content === null) {
+        content = await fetchBlobContent(owner, name, item.sha, token);
+      }
+
       results[currentIndex] = {
         path: item.path,
         content,
@@ -162,7 +305,7 @@ async function fetchBlobsWithConcurrency(
     }
   }
 
-  const workerCount = Math.min(BLOB_FETCH_CONCURRENCY, items.length);
+  const workerCount = Math.min(FILE_FETCH_CONCURRENCY, items.length);
   const workers: Promise<void>[] = [];
   for (let i = 0; i < workerCount; i += 1) {
     workers.push(worker());
@@ -207,7 +350,14 @@ export async function fetchGitHubCodeFiles(
   const limitedItems = eligibleCodeItems.slice(0, MAX_CODE_FILES);
   const files =
     limitedItems.length > 0
-      ? await fetchBlobsWithConcurrency(encodedOwner, encodedName, limitedItems, token)
+      ? await fetchFilesHybridWithConcurrency(
+          repoData.owner.login,
+          repoData.name,
+          repoData.default_branch,
+          Boolean(repoData.private),
+          limitedItems,
+          token
+        )
       : [];
 
   const metadata: RepoMetadata = {
@@ -220,7 +370,27 @@ export async function fetchGitHubCodeFiles(
     totalCodeFilesInRepo: eligibleCodeItems.length,
     analyzedFilesLimitReached: eligibleCodeItems.length > MAX_CODE_FILES,
     maxCodeFilesLimit: MAX_CODE_FILES,
+    fromCache: false,
   };
 
   return { metadata, files };
+}
+
+/**
+ * Loads an analyzed dependency graph from the 30-minute localStorage cache when available,
+ * or fetches and analyzes the repository using hybrid API + Raw CDN requests.
+ */
+export async function analyzeGitHubRepository(
+  ref: ParsedRepoRef,
+  token?: string
+): Promise<CodeGraph> {
+  const cachedGraph = readCachedRepoGraph(ref);
+  if (cachedGraph) {
+    return cachedGraph;
+  }
+
+  const { metadata, files } = await fetchGitHubCodeFiles(ref, token);
+  const analyzedGraph = buildDependencyGraph(metadata, files);
+  writeCachedRepoGraph(ref, analyzedGraph);
+  return analyzedGraph;
 }

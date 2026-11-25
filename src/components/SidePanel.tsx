@@ -55,11 +55,18 @@ export function SidePanel({
               <span className="truncate text-sm font-medium text-zinc-100">
                 {graph.repo.fullName}
               </span>
-              {graph.repo.isDemo && (
-                <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
-                  DEMO
-                </span>
-              )}
+              <div className="flex shrink-0 items-center gap-1.5">
+                {graph.repo.fromCache && (
+                  <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                    CACHÉ
+                  </span>
+                )}
+                {graph.repo.isDemo && (
+                  <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
+                    DEMO
+                  </span>
+                )}
+              </div>
             </div>
             <p className="text-xs leading-relaxed text-zinc-400">{graph.repo.description}</p>
             <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-500">

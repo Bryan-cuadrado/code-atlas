@@ -13,7 +13,7 @@ import {
   formatAnalysisAsMarkdown,
 } from './core/reportExporter';
 import { DEMO_REPO_METADATA, DEMO_SOURCE_FILES } from './data/demoRepo';
-import { fetchGitHubCodeFiles, GitHubApiError } from './services/githubApi';
+import { analyzeGitHubRepository, GitHubApiError } from './services/githubApi';
 import type { AppError, CodeGraph, ExportFormat, GraphNodeData } from './types/graph';
 
 function triggerFileDownload(fileName: string, content: string, mimeType: string): void {
@@ -90,8 +90,7 @@ export function App() {
     setSearchQuery('');
 
     try {
-      const { metadata, files } = await fetchGitHubCodeFiles(parsed, githubToken);
-      const nextGraph = buildDependencyGraph(metadata, files);
+      const nextGraph = await analyzeGitHubRepository(parsed, githubToken);
       setGraph(nextGraph);
     } catch (caughtError: unknown) {
       if (caughtError instanceof GitHubApiError) {
