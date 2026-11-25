@@ -27,9 +27,11 @@ export function HeaderBar({
   return (
     <header className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800/80 bg-zinc-950/90 px-5 py-3.5 backdrop-blur">
       <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-indigo-500/30 bg-indigo-500/10 text-sm font-semibold text-indigo-400">
-          CA
-        </div>
+        <img
+          src="./favicon.svg"
+          alt="Logo de CodeAtlas"
+          className="h-8 w-8 rounded-lg"
+        />
         <div>
           <h1 className="text-sm font-semibold tracking-tight text-zinc-100">CodeAtlas</h1>
           <p className="text-xs text-zinc-400">Análisis multilenguaje de dependencias</p>
